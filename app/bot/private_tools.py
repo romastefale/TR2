@@ -66,40 +66,6 @@ def _ensure_known_groups_table() -> None:
             )
         )
 
-
-def _ensure_group_rules_table() -> None:
-    with engine.begin() as conn:
-        conn.execute(
-            text(
-                """
-                CREATE TABLE IF NOT EXISTS group_rules (
-                    chat_id INTEGER,
-                    rule_type TEXT,
-                    payload TEXT,
-                    updated_at DATETIME,
-                    PRIMARY KEY (chat_id, rule_type)
-                );
-                """
-            )
-        )
-
-
-def _ensure_warns_table() -> None:
-    with engine.begin() as conn:
-        conn.execute(
-            text(
-                """
-                CREATE TABLE IF NOT EXISTS warns (
-                    chat_id INTEGER,
-                    user_id INTEGER,
-                    reason TEXT,
-                    created_at DATETIME
-                );
-                """
-            )
-        )
-
-
 def _ensure_ddx_rules_table() -> None:
     with engine.begin() as conn:
         conn.execute(
@@ -200,110 +166,11 @@ def _remember_group(chat_id: int, title: str | None) -> None:
 
 
 
-def _save_rule(chat_id: int, rule_type: str, payload: dict[str, object]) -> None:
-    _ensure_group_rules_table()
-
-    with engine.begin() as conn:
-        conn.execute(
-            text(
-                """
-                INSERT INTO group_rules (chat_id, rule_type, payload, updated_at)
-                VALUES (:chat_id, :rule_type, :payload, :updated_at)
-                ON CONFLICT(chat_id, rule_type) DO UPDATE SET
-                    payload = excluded.payload,
-                    updated_at = excluded.updated_at
-                """
-            ),
-            {
-                "chat_id": chat_id,
-                "rule_type": rule_type,
-                "payload": json.dumps(payload, ensure_ascii=False),
-                "updated_at": datetime.now(timezone.utc),
-            },
-        )
-
-
-def _get_rule(chat_id: int, rule_type: str) -> dict[str, object] | None:
-    _ensure_group_rules_table()
-
-    with engine.begin() as conn:
-        row = (
-            conn.execute(
-                text(
-                    """
-                    SELECT payload
-                    FROM group_rules
-                    WHERE chat_id = :chat_id AND rule_type = :rule_type
-                    """
-                ),
-                {
-                    "chat_id": chat_id,
-                    "rule_type": rule_type,
-                },
-            )
-            .mappings()
-            .first()
-        )
-
-    if not row or not row["payload"]:
-        return None
-
-    try:
-        data = json.loads(row["payload"])
-        logger.warning("DXX LOAD | chat_id=%s | data=%s", chat_id, data)
-        return data
-    except Exception:
-        logger.exception("Falha ao decodificar payload de regra: chat_id=%s rule_type=%s", chat_id, rule_type)
-        return None
-
-
-def _notify_enabled(chat_id: int) -> bool:
-    payload = _get_rule(chat_id, "notify")
-    if not payload:
-        return False
-
-    return bool(payload.get("enabled"))
-
-
-async def _notify_owner(bot, chat_id: int, text_message: str) -> None:
-    if not _notify_enabled(chat_id):
-        return
-
-    try:
-        await bot.send_message(
-            chat_id=OWNER_ID,
-            text=text_message,
-        )
-    except Exception:
-        logger.exception("Falha ao notificar owner: chat_id=%s", chat_id)
-
-
-def _add_warn(chat_id: int, user_id: int, reason: str) -> None:
-    _ensure_warns_table()
-
-    with engine.begin() as conn:
-        conn.execute(
-            text(
-                """
-                INSERT INTO warns (chat_id, user_id, reason, created_at)
-                VALUES (:chat_id, :user_id, :reason, :created_at)
-                """
-            ),
-            {
-                "chat_id": chat_id,
-                "user_id": user_id,
-                "reason": reason,
-                "created_at": datetime.now(timezone.utc),
-            },
-        )
-
-
 async def _execute_action(
     bot,
     chat_id: int,
     user_id: int,
     action: str,
-    duration_minutes: int | None = None,
 ) -> None:
     if not user_id:
         return
@@ -320,23 +187,6 @@ async def _execute_action(
             chat_id=chat_id,
             user_id=user_id,
         )
-        return
-
-    if action == "mute":
-        if duration_minutes is None or duration_minutes == 0:
-            until = None  # mute permanente
-        else:
-            until = datetime.now(timezone.utc) + timedelta(minutes=duration_minutes)
-        await bot.restrict_chat_member(
-            chat_id=chat_id,
-            user_id=user_id,
-            permissions=ChatPermissions(can_send_messages=False),
-            until_date=until,
-        )
-        return
-
-    if action == "warn":
-        _add_warn(chat_id, user_id, "manual_warn")
         return
 
     raise ValueError(f"ação inválida: {action}")
@@ -1018,7 +868,6 @@ async def vx(message: Message) -> None:
         user_id = _parse_user_id(lines[2])
         await _execute_action(message.bot, chat_id, user_id, "vanish")
         _remember_group(chat_id, str(chat_id))
-        await _notify_owner(message.bot, chat_id, f"Vanish executado | user_id={user_id}")
         await message.answer(
             _success_text(
                 "Vanish executado.",
@@ -1064,7 +913,6 @@ async def uv(message: Message) -> None:
         user_id = _parse_user_id(lines[2])
         await _execute_action(message.bot, chat_id, user_id, "unvanish")
         _remember_group(chat_id, str(chat_id))
-        await _notify_owner(message.bot, chat_id, f"Unvanish executado | user_id={user_id}")
         await message.answer(
             _success_text(
                 "Unvanish executado.",
@@ -1164,333 +1012,51 @@ async def mx(message: Message) -> None:
         )
 
 
-@router.message(Command("ovbx"))
-async def ovbx(message: Message) -> None:
-    if not _is_owner_private_message(message):
-        return
-
-    lines = _lines(message)
-    if len(lines) < 4:
-        await message.answer(
-            "Título: Painel direto de moderação\n"
-            "Descrição: Executa ação direta sem depender de sessão.\n\n"
-            "Use:\n"
-            "/ovbx\n"
-            "<chat_id>\n"
-            "<user_id>\n"
-            "<vanish|unvanish|mute>\n"
-            "<minutos opcional para mute>"
-        )
-        return
-
-    try:
-        chat_id = _parse_chat_id(lines[1])
-        user_id = _parse_user_id(lines[2])
-        action = lines[3].strip().lower()
-
-        if action not in {"vanish", "unvanish", "mute"}:
-            await message.answer(
-                _error_text(
-                    "ação inválida",
-                    "use vanish, unvanish ou mute",
-                )
-            )
-            return
-
-        minutes = int(lines[4]) if action == "mute" and len(lines) >= 5 else 10
-        minutes = max(1, min(minutes, 120))
-
-        await _execute_action(message.bot, chat_id, user_id, action, minutes)
-        _remember_group(chat_id, str(chat_id))
-        await _notify_owner(message.bot, chat_id, f"Ação executada: {action} | user_id={user_id}")
-        await message.answer(
-            _success_text(
-                "Ação executada.",
-                f"Grupo: {chat_id}\nUsuário: {user_id}\nAção: {action}",
-            )
-        )
-    except TelegramForbiddenError:
-        await message.answer(
-            _error_text(
-                "operação não permitida",
-                "verifique se o bot é administrador e possui permissões suficientes",
-            )
-        )
-    except Exception:
-        logger.exception("Falha no ovbx")
-        await message.answer(
-            _error_text(
-                "falha na execução",
-                "verifique chat_id, user_id, ação e permissões do bot",
-            )
-        )
-
-
-@router.message(Command("lgx"))
-async def lgx(message: Message) -> None:
-    if not _is_owner_private_message(message):
-        return
-
-    lines = _lines(message)
-    if len(lines) < 3:
-        await message.answer(
-            "Título: Notificações privadas\n"
-            "Descrição: Ativa ou desativa alertas privados para ações internas.\n\n"
-            "Use:\n"
-            "/lgx\n"
-            "<chat_id>\n"
-            "<on|off>"
-        )
-        return
-
-    try:
-        chat_id = _parse_chat_id(lines[1])
-        value = lines[2].strip().lower()
-
-        if value not in {"on", "off", "true", "false", "1", "0", "sim", "nao", "não"}:
-            await message.answer(
-                _error_text(
-                    "valor inválido",
-                    "use on ou off",
-                )
-            )
-            return
-
-        enabled = value in {"on", "true", "1", "sim"}
-        _save_rule(chat_id, "notify", {"enabled": enabled})
-        _remember_group(chat_id, str(chat_id))
-
-        await message.answer(
-            _success_text(
-                "Notificações atualizadas.",
-                f"Grupo: {chat_id}\nStatus: {'ativas' if enabled else 'inativas'}",
-            )
-        )
-    except Exception:
-        logger.exception("Falha ao salvar notificação lgx")
-        await message.answer(
-            _error_text(
-                "falha ao salvar notificação",
-                "verifique chat_id e valor on/off",
-            )
-        )
-
-
-@router.message(Command("fdx"))
-async def fdx(message: Message) -> None:
-    if not _is_owner_private_message(message):
-        return
-
-    lines = _lines(message)
-    if len(lines) < 3:
-        await message.answer(
-            "Título: Busca\n"
-            "Descrição: Busca registros internos de advertência.\n\n"
-            "Use:\n"
-            "/fdx\n"
-            "<chat_id>\n"
-            "<termo>"
-        )
-        return
-
-    try:
-        chat_id = _parse_chat_id(lines[1])
-        term = f"%{lines[2].strip().lower()}%"
-
-        _ensure_warns_table()
-
-        with engine.begin() as conn:
-            rows = (
-                conn.execute(
-                    text(
-                        """
-                        SELECT user_id, reason, created_at
-                        FROM warns
-                        WHERE chat_id = :chat_id AND lower(reason) LIKE :term
-                        ORDER BY created_at DESC
-                        LIMIT 20
-                        """
-                    ),
-                    {
-                        "chat_id": chat_id,
-                        "term": term,
-                    },
-                )
-                .mappings()
-                .all()
-            )
-
-        if not rows:
-            await message.answer("Nenhum resultado.")
-            return
-
-        await message.answer(
-            "\n".join(
-                f"{row['user_id']} | {row['reason']} | {row['created_at']}"
-                for row in rows
-            )
-        )
-    except Exception:
-        logger.exception("Falha na busca fdx")
-        await message.answer(
-            _error_text(
-                "falha na busca",
-                "verifique chat_id e termo informado",
-            )
-        )
-
-
-@router.message(Command("clx"))
-async def clx(message: Message) -> None:
-    if not _is_owner_private_message(message):
-        return
-
-    lines = _lines(message)
-    if len(lines) < 3:
-        await message.answer(
-            "Título: Limpeza\n"
-            "Descrição: Executa limpeza segura de registros internos.\n\n"
-            "Use:\n"
-            "/clx\n"
-            "<chat_id>\n"
-            "<warns|group_rules|old_requests>"
-        )
-        return
-
-    try:
-        chat_id = _parse_chat_id(lines[1])
-        target = lines[2].strip().lower()
-
-        if target not in {"warns", "group_rules", "old_requests"}:
-            await message.answer(
-                _error_text(
-                    "tipo inválido",
-                    "use warns, group_rules ou old_requests",
-                )
-            )
-            return
-
-        if target == "warns":
-            _ensure_warns_table()
-            with engine.begin() as conn:
-                conn.execute(
-                    text("DELETE FROM warns WHERE chat_id = :chat_id"),
-                    {"chat_id": chat_id},
-                )
-
-        if target == "group_rules":
-            _ensure_group_rules_table()
-            with engine.begin() as conn:
-                conn.execute(
-                    text("DELETE FROM group_rules WHERE chat_id = :chat_id"),
-                    {"chat_id": chat_id},
-                )
-
-        if target == "old_requests":
-            _ensure_join_requests_table()
-            cutoff = datetime.now(timezone.utc) - APPROVAL_WINDOW
-            with engine.begin() as conn:
-                conn.execute(
-                    text("DELETE FROM join_requests WHERE created_at < :cutoff"),
-                    {"cutoff": cutoff},
-                )
-
-        await message.answer(
-            _success_text(
-                "Limpeza executada.",
-                f"Grupo: {chat_id}\nTipo: {target}",
-            )
-        )
-    except Exception:
-        logger.exception("Falha na limpeza clx")
-        await message.answer(
-            _error_text(
-                "falha na limpeza",
-                "verifique chat_id e tipo informado",
-            )
-        )
-
-
-
 
 @router.message(Command("xend"))
 async def xend(message: Message) -> None:
     if not _is_owner_private_message(message):
         return
 
-    lines = _lines(message)
-    if len(lines) < 3:
-        await message.answer(
-            "Use:\n"
-            "/xend\n"
-            "<chat_id>\n"
-            "<mensagem>"
-        )
+    parts = (message.text or "").split(maxsplit=1)
+    chat_id_raw: str | None = None
+
+    if len(parts) >= 2 and parts[1].strip():
+        chat_id_raw = parts[1].strip().splitlines()[0].strip()
+    else:
+        lines = _lines(message)
+        if len(lines) >= 2:
+            chat_id_raw = lines[1]
+
+    if not chat_id_raw:
+        await message.answer("Uso: responda uma mensagem com /xend <chat_id>.")
+        return
+
+    if not message.reply_to_message:
+        await message.answer("Responda no privado a mensagem que deseja enviar usando /xend <chat_id>.")
         return
 
     try:
-        chat_id = _parse_chat_id(lines[1])
-        text_message = "\n".join(lines[2:]).strip()
+        chat_id = _parse_chat_id(chat_id_raw)
+    except Exception:
+        await message.answer("Uso: responda uma mensagem com /xend <chat_id>.")
+        return
 
-        # 🔹 Se respondeu alguma mensagem com mídia → copiar
-        if message.reply_to_message:
-            reply = message.reply_to_message
-
-            try:
-                await message.bot.copy_message(
-                    chat_id=chat_id,
-                    from_chat_id=message.chat.id,
-                    message_id=reply.message_id,
-                )
-
-                await message.answer(
-                    _success_text(
-                        "Mensagem enviada (cópia).",
-                        f"Destino: {chat_id}",
-                    )
-                )
-                return
-
-            except Exception:
-                logger.exception("Falha ao copiar mensagem no xend")
-
-        # 🔹 fallback texto
-        if not text_message:
-            await message.answer(
-                _error_text(
-                    "mensagem vazia",
-                    "informe o conteúdo ou responda uma mensagem",
-                )
-            )
-            return
-
-        await message.bot.send_message(
+    try:
+        await message.bot.copy_message(
             chat_id=chat_id,
-            text=text_message,
+            from_chat_id=message.reply_to_message.chat.id,
+            message_id=message.reply_to_message.message_id,
         )
-
-        await message.answer(
-            _success_text(
-                "Mensagem enviada.",
-                f"Destino: {chat_id}",
-            )
-        )
-
+        await message.answer("Mensagem enviada.")
     except TelegramForbiddenError:
         await message.answer(
-            _error_text(
-                "operação não permitida",
-                "verifique se o bot pode enviar mensagens para este chat",
-            )
+            "Não consegui enviar a mensagem. Verifique se o bot tem permissão no chat de destino."
         )
-
     except Exception:
         logger.exception("Falha no comando xend")
         await message.answer(
-            _error_text(
-                "falha ao enviar mensagem",
-                "verifique chat_id e conteúdo da mensagem",
-            )
+            "Não consegui enviar a mensagem. Verifique se o bot tem permissão no chat de destino."
         )
 
 
@@ -1560,6 +1126,8 @@ async def ximg(message: Message) -> None:
             )
         )
 
+
+
 @router.message(Command("hidden"))
 async def hidden(message: Message) -> None:
     if not _is_owner_private_message(message):
@@ -1609,12 +1177,6 @@ async def hidden(message: Message) -> None:
         "<user_id>\n"
         "<tempo>\n"
         "Silencia ou desmuta usuário. Tempo: 10m, 2h, 3d, i ou x.\n\n"
-        "/ovbx\n"
-        "<chat_id>\n"
-        "<user_id>\n"
-        "<vanish|unvanish|mute>\n"
-        "[minutos]\n"
-        "Executa ação manual completa.\n\n"
         "ACESSO\n\n"
         "/mx1\n"
         "<chat_id>\n"
@@ -1630,27 +1192,9 @@ async def hidden(message: Message) -> None:
         "<chat_id>\n"
         "<user_id>\n"
         "Remove, libera e gera link direto para resetar entrada.\n\n"
-        "/plus\n"
-        "<chat_id>\n"
-        "<user_id_ou_@username>\n"
-        "Tenta convidar usuário ou gera link alternativo.\n\n"
         "SISTEMA E SUPORTE\n\n"
-        "/lgx\n"
-        "<chat_id>\n"
-        "<on|off>\n"
-        "Ativa ou desativa notificações privadas.\n\n"
-        "/fdx\n"
-        "<chat_id>\n"
-        "<termo>\n"
-        "Busca registros internos de advertência.\n\n"
-        "/clx\n"
-        "<chat_id>\n"
-        "<warns|group_rules|old_requests>\n"
-        "Executa limpeza segura de registros internos.\n\n"
-        "/xend\n"
-        "<chat_id>\n"
-        "<mensagem>\n"
-        "Envia mensagem ao grupo. Também pode copiar mídia respondida.\n\n"
+        "/xend <chat_id>\n"
+        "Use respondendo no privado a mensagem que deseja copiar para o destino.\n\n"
         "/ximg\n"
         "<chat_id>\n"
         "Troca a foto do grupo quando usado respondendo a uma imagem.\n\n"

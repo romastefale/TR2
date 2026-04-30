@@ -12,6 +12,7 @@ Bot de Telegram integrado ao Spotify para mostrar a música atual ou a última m
 - Executar comandos administrativos privados restritos ao `OWNER_ID`.
 - Apagar mensagens por link com `/dx`.
 - Gerenciar links, permissões e solicitações de entrada com comandos privados.
+- Copiar mensagens enviadas ao bot no privado para um chat de destino com `/xend` usando `copy_message`.
 
 ## Comandos públicos
 
@@ -65,26 +66,8 @@ Todos os comandos abaixo devem ser usados no privado do bot e são restritos ao 
 <user_id>
 <duração>
 
-/ovbx
-<chat_id>
-<user_id>
-<ban|mute|warn>
-
-/lgx
-<chat_id>
-<on|off>
-
-/fdx
-<chat_id>
-<termo>
-
-/clx
-<chat_id>
-<warns|group_rules|old_requests>
-
-/xend
-<chat_id>
-<mensagem>
+/xend <chat_id>
+Usar respondendo, no privado do bot, a mensagem que deve ser copiada para o destino.
 
 /ximg
 <chat_id>
@@ -94,10 +77,6 @@ Todos os comandos abaixo devem ser usados no privado do bot e são restritos ao 
 /vvv
 <chat_id>
 <user_id>
-
-/plus
-<chat_id>
-<user_id ou @username>
 ```
 
 ## Gatilhos textuais
@@ -144,6 +123,16 @@ Mostra estatísticas do grupo:
 - top artistas;
 - músicas mais curtidas.
 
+### /xend
+
+O comando `/xend` deve ser usado respondendo uma mensagem no privado do bot:
+
+```text
+/xend <chat_id>
+```
+
+O bot usa `copy_message` para reenviar ao destino a mensagem respondida, preservando mídia, legenda e entidades de formatação quando o Telegram permitir.
+
 ## Banco de dados
 
 Tabelas usadas pelo fluxo atual:
@@ -153,8 +142,6 @@ Tabelas usadas pelo fluxo atual:
 - `track_likes`;
 - `join_requests`;
 - `known_groups`;
-- `group_rules`;
-- `warns`;
 - `ddx_rules`.
 
 ## Deploy

@@ -6,13 +6,12 @@ Documento atualizado para refletir a versão atual do bot e seus comandos admini
 
 ## Fluxo atual
 
-O bot usa FastAPI com webhook e um único dispatcher principal. No startup, o app inclui os routers administrativos e registra os handlers principais.
+O bot usa FastAPI com webhook e um único dispatcher principal. No startup, o app inclui os routers administrativos ativos e registra os handlers principais.
 
 Routers ativos:
 
 - `private_tools`;
 - `lili_rodou`;
-- `plus`;
 - handlers registrados por `_register_handlers`.
 
 ## Segurança administrativa
@@ -30,15 +29,10 @@ Comandos administrativos atuais:
 /vx
 /uv
 /mx
-/ovbx
-/lgx
-/fdx
-/clx
 /xend
 /ximg
 /hidden
 /vvv
-/plus
 ```
 
 ## Join request
@@ -51,8 +45,16 @@ Para maior confiabilidade, o webhook é registrado com `allowed_updates=dispatch
 
 O comando `/dx` apaga uma ou mais mensagens por link. O bot precisa ter permissão administrativa para apagar mensagens no chat de destino.
 
+O comando `/xend` copia para o chat de destino uma mensagem enviada ao bot no privado. O uso esperado é responder a mensagem original com:
+
+```text
+/xend <chat_id>
+```
+
+A implementação usa `copy_message`, preservando mídia, legenda e entidades de formatação quando o Telegram permitir.
+
 ## Observações de produção
 
 - Validar `python -m compileall .` antes do deploy.
 - Validar `python -c "import app.main; print('import ok')"` no ambiente com dependências instaladas.
-- Testar `/hidden`, `/dx`, `/mx2`, `/joinx`, `/vvv`, `/plus`, `/playing` e callbacks de like/play no Telegram real.
+- Testar `/hidden`, `/dx`, `/mx2`, `/joinx`, `/vvv`, `/xend`, `/playing` e callbacks de like/play no Telegram real.
