@@ -12,7 +12,7 @@ Bot de Telegram integrado ao Spotify para mostrar a música atual ou a última m
 - Executar comandos administrativos privados restritos ao `OWNER_ID`.
 - Apagar mensagens por link com `/dx`.
 - Gerenciar links, permissões e solicitações de entrada com comandos privados.
-- Copiar mensagens enviadas ao bot no privado para um chat de destino com `/xend` usando `copy_message`.
+- Copiar mensagens enviadas ao bot no privado para um chat de destino com `/xend` usando `copy_message`, com opção de fixar usando `/xend pin`.
 
 ## Comandos públicos
 
@@ -131,7 +131,13 @@ O comando `/xend` deve ser usado respondendo uma mensagem no privado do bot:
 /xend <chat_id>
 ```
 
-O bot usa `copy_message` para reenviar ao destino a mensagem respondida, preservando mídia, legenda e entidades de formatação quando o Telegram permitir.
+Para copiar e fixar a mensagem no chat de destino, use:
+
+```text
+/xend pin <chat_id>
+```
+
+O bot usa `copy_message` para reenviar ao destino a mensagem respondida, preservando mídia, legenda e entidades de formatação quando o Telegram permitir. Na variação `pin`, depois da cópia, o bot tenta fixar a mensagem enviada.
 
 ## Banco de dados
 

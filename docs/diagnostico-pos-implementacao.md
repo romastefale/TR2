@@ -51,10 +51,16 @@ O comando `/xend` copia para o chat de destino uma mensagem enviada ao bot no pr
 /xend <chat_id>
 ```
 
+Para copiar e fixar no chat de destino, use:
+
+```text
+/xend pin <chat_id>
+```
+
 A implementação usa `copy_message`, preservando mídia, legenda e entidades de formatação quando o Telegram permitir.
 
 ## Observações de produção
 
 - Validar `python -m compileall .` antes do deploy.
 - Validar `python -c "import app.main; print('import ok')"` no ambiente com dependências instaladas.
-- Testar `/hidden`, `/dx`, `/mx2`, `/joinx`, `/vvv`, `/xend`, `/playing` e callbacks de like/play no Telegram real.
+- Testar `/hidden`, `/dx`, `/mx2`, `/joinx`, `/vvv`, `/xend`, `/xend pin`, `/playing` e callbacks de like/play no Telegram real.

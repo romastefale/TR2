@@ -7,7 +7,7 @@ import unicodedata
 from datetime import datetime, timedelta, timezone
 
 from aiogram import Router
-from aiogram.exceptions import TelegramForbiddenError
+from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from aiogram.filters import Command
 from aiogram.types import (
     ChatJoinRequest,
@@ -1018,36 +1018,59 @@ async def xend(message: Message) -> None:
     if not _is_owner_private_message(message):
         return
 
-    parts = (message.text or "").split(maxsplit=1)
+    args = (message.text or "").split()
     chat_id_raw: str | None = None
+    should_pin = False
 
-    if len(parts) >= 2 and parts[1].strip():
-        chat_id_raw = parts[1].strip().splitlines()[0].strip()
-    else:
-        lines = _lines(message)
-        if len(lines) >= 2:
-            chat_id_raw = lines[1]
+    if len(args) >= 2:
+        first_arg = args[1].strip()
+        second_arg = args[2].strip() if len(args) >= 3 else ""
+
+        if first_arg.lower() == "pin":
+            should_pin = True
+            chat_id_raw = second_arg or None
+        else:
+            chat_id_raw = first_arg
+            should_pin = any(arg.lower() == "pin" for arg in args[2:])
 
     if not chat_id_raw:
-        await message.answer("Uso: responda uma mensagem com /xend <chat_id>.")
+        await message.answer("Uso: responda uma mensagem com /xend <chat_id> ou /xend pin <chat_id>.")
         return
 
     if not message.reply_to_message:
-        await message.answer("Responda no privado a mensagem que deseja enviar usando /xend <chat_id>.")
+        await message.answer(
+            "Responda no privado a mensagem que deseja enviar usando /xend <chat_id> ou /xend pin <chat_id>."
+        )
         return
 
     try:
         chat_id = _parse_chat_id(chat_id_raw)
     except Exception:
-        await message.answer("Uso: responda uma mensagem com /xend <chat_id>.")
+        await message.answer("Uso: responda uma mensagem com /xend <chat_id> ou /xend pin <chat_id>.")
         return
 
     try:
-        await message.bot.copy_message(
+        copied_message = await message.bot.copy_message(
             chat_id=chat_id,
             from_chat_id=message.reply_to_message.chat.id,
             message_id=message.reply_to_message.message_id,
         )
+
+        if should_pin:
+            try:
+                await message.bot.pin_chat_message(
+                    chat_id=chat_id,
+                    message_id=copied_message.message_id,
+                    disable_notification=True,
+                )
+                await message.answer("Mensagem enviada e fixada.")
+            except (TelegramBadRequest, TelegramForbiddenError):
+                logger.exception("Mensagem enviada, mas falhou ao fixar")
+                await message.answer(
+                    "Mensagem enviada, mas não consegui fixar. Verifique se o bot pode fixar mensagens no chat de destino."
+                )
+            return
+
         await message.answer("Mensagem enviada.")
     except TelegramForbiddenError:
         await message.answer(
@@ -1195,6 +1218,8 @@ async def hidden(message: Message) -> None:
         "SISTEMA E SUPORTE\n\n"
         "/xend <chat_id>\n"
         "Use respondendo no privado a mensagem que deseja copiar para o destino.\n\n"
+        "/xend pin <chat_id>\n"
+        "Copia a mensagem respondida para o destino e fixa no chat, se o bot tiver permissão.\n\n"
         "/ximg\n"
         "<chat_id>\n"
         "Troca a foto do grupo quando usado respondendo a uma imagem.\n\n"
