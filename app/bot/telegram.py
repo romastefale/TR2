@@ -1,0 +1,946 @@
+from __future__ import annotations
+import html
+import logging
+import re
+import time
+import uuid
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
+import httpx
+from sqlalchemy import text
+
+from aiogram import Dispatcher, F
+from aiogram.exceptions import TelegramBadRequest
+from aiogram.filters import Command
+from aiogram.types import (
+    Message,
+    CallbackQuery,
+    InlineQuery,
+    InlineQueryResultPhoto,
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
+)
+from app.bot.intent import detect_intent
+from app.config.settings import OWNER_ID, TELEGRAM_BOT_TOKEN
+from app.core.runtime import allow
+from app.db.database import SessionLocal
+from app.services.likes import likes_service
+from app.services.spotify import spotify_service
+
+logger = logging.getLogger(__name__)
+
+bot_dispatcher: Dispatcher = Dispatcher()
+SAO_PAULO_TZ = ZoneInfo("America/Sao_Paulo")
+BLOCKED_WORDS = ["palavra1", "palavra2"]
+OWNER_LINK_RE = re.compile(r"tg://user\?id=(\d+)")
+MOOD_PHRASES_NORMAL = {
+    0: "☹︎ <i>Acho que <b>{name}</b> está no fundo de um abismo, onde até o silêncio pesa.</i>",
+    1: "⍨ <i>Acho que <b>{name}</b> está preso em uma melancolia que drena até o que resta.</i>",
+    2: "❃ <i>Acho que <b>{name}</b> está vagando em incertezas, tentando se reconhecer.</i>",
+    3: "⚲ <i>Acho que <b>{name}</b> está lutando para manter acesa uma esperança.</i>",
+    4: "✧ <i>Acho que <b>{name}</b> está começando a enxergar luz onde antes só havia peso.</i>",
+    5: "ꕤ <i>Acho que <b>{name}</b> está em equilíbrio, sustentando o próprio centro.</i>",
+    6: "✦ <i>Acho que <b>{name}</b> está retomando o controle e sentindo a força voltar.</i>",
+    7: "❀ <i>Acho que <b>{name}</b> está florescendo, em paz com o presente.</i>",
+    8: "✶ <i>Acho que <b>{name}</b> está irradiando energia que aquece tudo ao redor.</i>",
+    9: "✵ <i>Acho que <b>{name}</b> está em êxtase, vibrando acima de tudo.</i>",
+    10: "☻ <i>Acho que <b>{name}</b> está radiante, tomado por uma felicidade que transborda.</i>",
+}
+MOOD_PHRASES_CUNTY = {
+    0: "☹︎ <i>Infelizmente <b>{name}</b> não está mal — queria nem existir mesmo.</i>",
+    1: "⍨ <i>Dessa vez <b>{name}</b> está se arrastando por um dia que nem deveria ter existido.</i>",
+    2: "❃ <i>Acho que <b>{name}</b> está fudido, mas sabe que vai dar um jeito.</i>",
+    3: "⚲ <i>Acho que <b>{name}</b> está cansado de muito e de muitos, mas ainda não desistiu — vai ter volta.</i>",
+    4: "✧ <i>Felizmente <b>{name}</b> está começando a reagir, o fim de alguns está previsto.</i>",
+    5: "ꕤ <i>Acho que <b>{name}</b> está acordando — não por acaso, mas porque é uma gostosa resiliente.</i>",
+    6: "✦ <i>Boatos que <b>{name}</b> está voltando, gostosas são assim, como uma fênix.</i>",
+    7: "❀ <i>Soube que <b>{name}</b> está bem — e dessa vez, não haverá paz.</i>",
+    8: "✶ <i>O <b>{name}</b> está brilhando de um jeito que incomoda, e quem tem inveja se queima.</i>",
+    9: "✵ <i>Hoje <b>{name}</b> vai destruir alguém.</i>",
+    10: "☻ <i>Tenho certeza que <b>{name}</b> tem poder para iniciar o novo apocalipse — apenas tome cuidado.</i>",
+}
+
+
+def _safe_button(text: str, callback: str, style: str | None = None):
+    try:
+        if style:
+            return InlineKeyboardButton(
+                text=text,
+                callback_data=callback,
+                style=style
+            )
+    except Exception:
+        pass
+
+    # fallback universal (clientes antigos)
+    return InlineKeyboardButton(
+        text=text,
+        callback_data=callback
+    )
+
+def _normalize_optional_text(value: object) -> str | None:
+    if isinstance(value, str):
+        cleaned = value.strip()
+        return cleaned or None
+
+    if value is None:
+        return None
+
+    try:
+        cleaned = str(value).strip()
+    except Exception:
+        return None
+    return cleaned or None
+
+async def _handle_spotify_error(message: Message, exc: Exception) -> None:
+    logger.exception("Telegram command failed", exc_info=exc)
+    await message.answer(
+        "Spotify is temporarily unavailable right now. Please try again in a few seconds."
+    )
+
+
+def _playing_keyboard(track_id: str, total_plays: int, total_likes: int, liked: bool) -> InlineKeyboardMarkup:
+    heart = "♥" if liked else "♡"
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                _safe_button(
+                    text=f"♫ {total_plays}",
+                    callback=f"plays:{track_id}",
+                    style="success"
+                ),
+                _safe_button(
+                    text=f"{heart} {total_likes}",
+                    callback=f"like:{track_id}",
+                    style="danger"
+                ),
+            ]
+        ]
+    )
+    return keyboard
+
+
+def _extract_owner_user_id_from_message(message: Message | None) -> int | None:
+    if not message:
+        return None
+
+    payload = message.html_text or message.caption_html or message.text or message.caption or ""
+    match = OWNER_LINK_RE.search(payload)
+    if not match:
+        return None
+    try:
+        return int(match.group(1))
+    except (TypeError, ValueError):
+        return None
+
+
+def _register_handlers(dp: Dispatcher) -> None:
+
+    # ========================
+    # INLINE MODE
+    # ========================
+    @dp.inline_query()
+    async def inline_play(query: InlineQuery) -> None:
+        text = (query.query or "").strip()
+        lowered_text = text.lower()
+        if lowered_text == "playing":
+            user_id = query.from_user.id
+            track = await spotify_service.get_current_or_last_played(user_id)
+            if not track:
+                return
+
+            track_name = str(track.get("track_name") or "")
+            artist = str(track.get("artist") or "")
+            spotify_url = str(track.get("spotify_url") or "")
+            display_name = query.from_user.full_name or "Usuário"
+            album_image_url = track.get("album_image_url") or "https://via.placeholder.com/512"
+            caption = (
+                f"<i>{display_name} · ♫ "
+                f"<a href=\"{spotify_url}\">{track_name}</a>"
+                f" - {artist}</i>"
+            )
+
+            result = InlineQueryResultPhoto(
+                id=str(uuid.uuid4()),
+                photo_url=album_image_url,
+                thumbnail_url=album_image_url,
+                caption=caption,
+                parse_mode="HTML",
+            )
+
+            await query.answer([result], cache_time=2)
+            return
+
+        if not lowered_text.startswith("mood"):
+            return
+
+        parts = text.split()
+        if len(parts) < 2:
+            return
+
+        valor = parts[1]
+        if valor.endswith("c"):
+            modo = "cunty"
+            valor = valor[:-1]
+        else:
+            modo = "normal"
+
+        try:
+            nota = int(valor)
+        except ValueError:
+            return
+
+        if nota < 0 or nota > 10:
+            return
+
+        user_id = query.from_user.id
+        track = await spotify_service.get_current_or_last_played(user_id)
+        if not track:
+            return
+
+        display_name = html.escape(query.from_user.full_name or "Usuário")
+        track_name = html.escape(str(track["track_name"]))
+        artist = html.escape(str(track["artist"]))
+        phrases = MOOD_PHRASES_CUNTY if modo == "cunty" else MOOD_PHRASES_NORMAL
+        phrase = phrases[nota].format(name=display_name)
+        caption = (
+            f"{display_name} · ♫ {track_name} — {artist}\n\n"
+            f"{phrase}"
+        )
+        album_image_url = track.get("album_image_url")
+        if not album_image_url:
+            album_image_url = "https://via.placeholder.com/512"
+
+        result = InlineQueryResultPhoto(
+            id=str(uuid.uuid4()),
+            photo_url=album_image_url,
+            thumbnail_url=album_image_url,
+            caption=caption,
+            parse_mode="HTML",
+        )
+        await query.answer([result], cache_time=2)
+
+    # ========================
+    # COMMANDS
+    # ========================
+
+    @dp.message(Command("start"))
+    async def start(message: Message) -> None:
+        start_text = (
+            "♫ ♥ Bem-vindo ao tigraoRADIO\n\n"
+            "Conecte sua conta e acompanhe o que você está ouvindo no Spotify.\n\n"
+            "Comandos principais:\n"
+            "/playing — mostrar música atual\n"
+            "/mood — analisar o clima da faixa atual\n"
+            "/myself — ver seu perfil musical\n"
+            "/songcharts — ver ranking do grupo\n\n"
+            "Conexão:\n"
+            "/login — conectar Spotify\n"
+            "/logout — desconectar conta\n\n"
+            "Interações:\n"
+            "Use os botões das mensagens de /playing para ver plays e curtir músicas"
+        )
+        if message.chat.type == "private":
+            await message.answer(start_text)
+            return
+
+        await message.answer(start_text)
+
+    @dp.message(Command("help"))
+    async def help_command(message: Message) -> None:
+        await message.answer(
+            "COMANDOS\n\n"
+            "♫ /playing\n"
+            "Mostra a música que você está ouvindo agora ou a última música encontrada no Spotify.\n\n"
+            "★ /myself\n"
+            "Mostra seu perfil musical com top músicas, top artistas e total de curtidas.\n\n"
+            "≡ /songcharts\n"
+            "Mostra o ranking do grupo com músicas, artistas e faixas mais curtidas.\n\n"
+            "☻ /mood <nota de 0 a 10>\n"
+            "Manda a musica e conte como está se sentindo!\n\n"
+            "↻ /login\n"
+            "Conecte sua conta do Spotify.\n\n"
+            "⨯ /logout\n"
+            "Desconecte sua conta.\n\n"
+            "♫♩Gatilhos de texto\n"
+            "Também acionam a lógica do /playing:\n"
+            "tocando, cyo, py, ag, rosan, roro, ro, rafarl, pipi, bressing, kur, xxt, ts, cebrutius, tigraofm, djpi, royalfm, geeksfm, radinho, qap\n\n"
+            "---\n\n"
+            "♥♡ Interações\n"
+            "Nos posts de /playing:\n\n"
+            "- botão ♫ mostra quantas vezes você ouviu a faixa\n"
+            "- botão ♥ alterna curtida"
+        )
+
+    @dp.message(Command("login"))
+    async def login(message: Message) -> None:
+        if message.chat.type != "private":
+            await message.answer("🔒 Use /login no privado para conectar seu Spotify.")
+            return
+
+        user_id = message.from_user.id if message.from_user else 0
+        link = spotify_service.build_auth_url(user_id)
+        await message.answer(f"Authorize Spotify access: {link}")
+
+    @dp.message(Command("playing"))
+    async def play(message: Message) -> None:
+        user_id = message.from_user.id if message.from_user else 0
+        try:
+            track = await spotify_service.get_current_or_last_played(user_id)
+            if not track:
+                await message.answer("Nada está tocando agora.")
+                return
+
+            track_id = _normalize_optional_text(track.get("track_id"))
+            if not track_id:
+                await message.answer("Erro ao identificar a música.")
+                return
+            track_name_raw = _normalize_optional_text(track.get("track_name"))
+            artist_name_raw = _normalize_optional_text(track.get("artist"))
+
+            track_url = str(track.get("spotify_url") or "")
+            await likes_service.register_play(
+                user_id,
+                track_id,
+                track_name=track_name_raw,
+                artist_name=artist_name_raw,
+            )
+
+            total_plays = await likes_service.get_track_play_count(track_id)
+            total_likes = await likes_service.get_total_likes(track_id, owner_user_id=user_id)
+            user_total_likes = await likes_service.get_user_received_likes(user_id)
+            liked = await likes_service.is_track_liked(user_id, track_id, owner_user_id=user_id)
+
+            display_name = message.from_user.full_name if message.from_user else "Unknown"
+            user_link = f"tg://user?id={user_id}"
+
+            track_name = track_name_raw or ""
+            artist_name = artist_name_raw or ""
+
+            track_name = html.escape(track_name)
+            artist_name = html.escape(artist_name)
+            display_name = html.escape(display_name)
+
+            caption = (
+                f"<b><a href=\"{html.escape(user_link)}\">{display_name}</a></b> · ♥ <code>{user_total_likes}</code>\n\n"
+                f"♫ <b><a href=\"{html.escape(track_url)}\">{track_name}</a></b> — <i>{artist_name}</i>"
+            )
+
+            keyboard = _playing_keyboard(track_id, total_plays, total_likes, liked)
+
+            album_image_url = track.get("album_image_url")
+            if album_image_url:
+                await message.answer_photo(
+                    photo=str(album_image_url),
+                    caption=caption,
+                    parse_mode="HTML",
+                    reply_markup=keyboard,
+                )
+                return
+
+            await message.answer(caption, parse_mode="HTML", reply_markup=keyboard)
+
+        except Exception as exc:
+            await _handle_spotify_error(message, exc)
+
+    @dp.message(Command("kingplay"))
+    async def kingplay(message: Message) -> None:
+        if not message.from_user or message.from_user.id != OWNER_ID:
+            return
+
+        parts = (message.text or "").splitlines()
+        if len(parts) < 2:
+            await message.answer("Use:\n/kingplay\n<chat_id>")
+            return
+
+        try:
+            target_chat_id = int(parts[1].strip())
+        except Exception:
+            await message.answer("chat_id inválido")
+            return
+
+        try:
+            chat = await message.bot.get_chat(target_chat_id)
+            group_name_raw = _normalize_optional_text(chat.title)
+        except Exception:
+            group_name_raw = _normalize_optional_text(str(target_chat_id))
+
+        try:
+            track = await spotify_service.get_current_or_last_played(message.from_user.id)
+        except Exception:
+            logger.exception("Falha Spotify no /kingplay")
+            await message.answer("Erro ao obter Spotify.")
+            return
+
+        if not track:
+            await message.answer("Nada tocando.")
+            return
+
+        track_name_raw = _normalize_optional_text(track.get("track_name"))
+        artist_name_raw = _normalize_optional_text(track.get("artist"))
+
+        track_name = html.escape(track_name_raw or "")
+        artist_name = html.escape(artist_name_raw or "")
+        group_name = html.escape(group_name_raw or "")
+        spotify_url = html.escape(str(track.get("spotify_url") or ""))
+
+        caption = f'<b><i>♫ {group_name} está ouvindo </i></b><a href="{spotify_url}"><b>{track_name}</b></a><b><i> — {artist_name}</i></b>'
+
+        try:
+            album_image_url = track.get("album_image_url")
+            if album_image_url:
+                sent = await message.bot.send_photo(
+                    chat_id=target_chat_id,
+                    photo=str(album_image_url),
+                    caption=caption,
+                    parse_mode="HTML",
+                )
+            else:
+                sent = await message.bot.send_message(
+                    chat_id=target_chat_id,
+                    text=caption,
+                    parse_mode="HTML",
+                )
+        except Exception as exc:
+            logger.exception("Falha de envio no /kingplay", exc_info=exc)
+            await message.answer("Erro ao enviar mensagem no grupo.")
+            return
+
+        try:
+            await message.bot.pin_chat_message(
+                chat_id=target_chat_id,
+                message_id=sent.message_id,
+            )
+        except Exception:
+            logger.exception("Falha ao fixar /kingplay")
+            pass
+
+
+    @dp.message(Command("mood"))
+    async def mood(message: Message) -> None:
+        try:
+            user_id = message.from_user.id if message.from_user else 0
+            parts = (message.text or "").split()
+            if len(parts) < 2:
+                await message.answer(
+                    "Erro: valor inválido.\n"
+                    "Use: /mood <0-10>\n"
+                    "Tente novamente.",
+                    parse_mode="HTML",
+                )
+                return
+
+            valor = parts[1]
+            if valor.endswith("c"):
+                modo = "cunty"
+                valor = valor[:-1]
+            else:
+                modo = "normal"
+
+            try:
+                nota = int(valor)
+            except ValueError:
+                await message.answer(
+                    "Erro: valor inválido.\n"
+                    "Use: /mood <0-10>\n"
+                    "Tente novamente.",
+                    parse_mode="HTML",
+                )
+                return
+
+            if nota < 0 or nota > 10:
+                await message.answer(
+                    "Erro: valor inválido.\n"
+                    "Use: /mood <0-10>\n"
+                    "Tente novamente.",
+                    parse_mode="HTML",
+                )
+                return
+
+            track = await spotify_service.get_current_or_last_played(user_id)
+            if not track:
+                return
+
+            display_name = html.escape(message.from_user.full_name if message.from_user else "Usuário")
+            track_name = html.escape(str(track["track_name"]))
+            artist = html.escape(str(track["artist"]))
+            album_image_url = track.get("album_image_url")
+            from_user_id = message.from_user.id if message.from_user else user_id
+            phrases = MOOD_PHRASES_CUNTY if modo == "cunty" else MOOD_PHRASES_NORMAL
+            phrase = phrases[nota].format(name=display_name)
+            caption = (
+                f'<a href="tg://user?id={from_user_id}">{display_name}</a> · '
+                f"♫ {track_name} — {artist}\n\n"
+                f"{phrase}"
+            )
+            if album_image_url:
+                await message.answer_photo(
+                    photo=album_image_url,
+                    caption=caption,
+                    parse_mode="HTML",
+                )
+            else:
+                await message.answer(caption, parse_mode="HTML")
+
+        except Exception as exc:
+            await _handle_spotify_error(message, exc)
+
+    @dp.message(Command("myself"))
+    async def handle_myself(message: Message):
+        logger.debug("MYSELF HANDLER HIT")
+        user_id = message.from_user.id
+        display_name = message.from_user.full_name if message.from_user else "Usuário"
+        safe_name = html.escape(display_name)
+        header = f"<a href='tg://user?id={user_id}'>{safe_name}</a> · ♥ {{likes}} curtidas"
+
+        logger.debug("CALLING SERVICE")
+        total_likes = await likes_service.get_user_total_likes(user_id)
+        top_tracks = await likes_service.get_user_top_tracks(user_id, limit=5)
+        top_artists = await likes_service.get_user_top_artists(user_id, limit=5)
+
+        if not top_tracks and not top_artists and total_likes == 0:
+            await message.answer(
+                f"{header.format(likes=total_likes)}\n\n"
+                "Nenhum dado disponível ainda.",
+                parse_mode="HTML",
+            )
+            return
+
+        tracks_lines = ["♫ Músicas"]
+        for index, (track_label, plays) in enumerate(top_tracks, start=1):
+            tracks_lines.append(f"♫ {index}. {track_label} — {plays}")
+
+        artists_lines = ["★ Artistas"]
+        for index, (artist_name, plays) in enumerate(top_artists, start=1):
+            artist_label = artist_name if artist_name else "Desconhecido"
+            artists_lines.append(f"★ {index}. {artist_label} — {plays}")
+
+        tracks_block = "\n".join(tracks_lines)
+        artists_block = "\n".join(artists_lines)
+        text = (
+            f"{header.format(likes=total_likes)}\n\n"
+            f"{tracks_block}\n\n"
+            f"{artists_block}"
+        )
+        logger.debug("SENDING RESPONSE")
+        await message.answer(text, parse_mode="HTML")
+
+    @dp.message(Command("songcharts"))
+    async def handle_songcharts(message: Message):
+        logger.debug("SONGCHARTS HANDLER HIT")
+        logger.debug("CALLING SERVICE")
+        top_tracks = await likes_service.get_top_tracks(limit=5)
+        top_artists = await likes_service.get_top_artists(limit=5)
+        most_liked_tracks = await likes_service.get_most_liked_tracks(limit=5)
+
+        if not top_tracks and not top_artists and not most_liked_tracks:
+            await message.answer(
+                "♫ Charts\n\n"
+                "Nenhum dado disponível ainda."
+            )
+            return
+
+        tracks_lines = ["♫ Músicas"]
+        for index, (track_label, plays) in enumerate(top_tracks, start=1):
+            tracks_lines.append(f"♫ {index}. {track_label} — {plays}")
+
+        artists_lines = ["★ Artistas"]
+        for index, (artist_name, plays) in enumerate(top_artists, start=1):
+            artist_label = artist_name if artist_name else "Desconhecido"
+            artists_lines.append(f"★ {index}. {artist_label} — {plays}")
+
+        liked_lines = ["♥ Mais curtidas"]
+        for index, (track_label, likes) in enumerate(most_liked_tracks, start=1):
+            liked_lines.append(f"♥ {index}. {track_label} — {likes}")
+
+        tracks_block = "\n".join(tracks_lines)
+        artists_block = "\n".join(artists_lines)
+        liked_block = "\n".join(liked_lines)
+        text = (
+            "♫ Ranking do grupo\n\n"
+            f"{tracks_block}\n\n"
+            f"{artists_block}\n\n"
+            f"{liked_block}"
+        )
+        logger.debug("SENDING RESPONSE")
+        await message.answer(text)
+
+    @dp.message(Command("debuguser"))
+    async def debug_user(message: Message) -> None:
+        if not message.from_user or message.from_user.id != OWNER_ID:
+            return
+
+        parts = (message.text or "").split(maxsplit=1)
+        if len(parts) < 2:
+            await message.answer("Uso: /debuguser <user_id>")
+            return
+
+        raw_target_user_id = parts[1].strip()
+        try:
+            target_user_id = int(raw_target_user_id)
+        except ValueError:
+            await message.answer("user_id inválido")
+            return
+
+        with SessionLocal() as db:
+            plays_rows = db.execute(
+                text(
+                    """
+                    SELECT
+                        track_id,
+                        COALESCE(MAX(track_name), track_id) as track_label,
+                        COUNT(*) as total
+                    FROM track_plays
+                    WHERE user_id = :uid
+                    GROUP BY track_id
+                    ORDER BY total DESC
+                    LIMIT 5
+                    """
+                ),
+                {"uid": target_user_id},
+            ).all()
+
+            total_plays = db.execute(
+                text(
+                    """
+                    SELECT COUNT(*)
+                    FROM track_plays
+                    WHERE user_id = :uid
+                    """
+                ),
+                {"uid": target_user_id},
+            ).scalar() or 0
+
+            likes_sent_rows = db.execute(
+                text(
+                    """
+                    SELECT
+                        track_id,
+                        COALESCE(MAX(track_name), track_id) as track_label,
+                        COALESCE(MAX(liked), 1) as liked
+                    FROM track_likes
+                    WHERE user_id = :uid
+                    GROUP BY track_id
+                    ORDER BY MAX(created_at) DESC
+                    LIMIT 5
+                    """
+                ),
+                {"uid": target_user_id},
+            ).all()
+
+            likes_sent = db.execute(
+                text(
+                    """
+                    SELECT COUNT(*)
+                    FROM track_likes
+                    WHERE user_id = :uid
+                    AND COALESCE(liked, 1) = 1
+                    """
+                ),
+                {"uid": target_user_id},
+            ).scalar() or 0
+
+            likes_received_rows = db.execute(
+                text(
+                    """
+                    SELECT
+                        likes.track_id,
+                        COALESCE(MAX(likes.track_name), likes.track_id) as track_label,
+                        COUNT(*) as total
+                    FROM track_likes likes
+                    WHERE likes.owner_user_id = :uid
+                    AND COALESCE(likes.liked, 1) = 1
+                    GROUP BY likes.track_id
+                    ORDER BY total DESC
+                    LIMIT 5
+                    """
+                ),
+                {"uid": target_user_id},
+            ).all()
+
+            likes_received = db.execute(
+                text(
+                    """
+                    SELECT COUNT(*)
+                    FROM track_likes
+                    WHERE owner_user_id = :uid
+                    AND COALESCE(liked, 1) = 1
+                    """
+                ),
+                {"uid": target_user_id},
+            ).scalar() or 0
+
+        status = "ativo" if int(total_plays) > 0 else "inativo"
+        if int(total_plays) <= 0:
+            engagement = "baixo"
+        else:
+            ratio = float(likes_received) / float(total_plays)
+            if ratio >= 0.5:
+                engagement = "alto"
+            elif ratio >= 0.1:
+                engagement = "médio"
+            else:
+                engagement = "baixo"
+
+        top_plays_lines = [
+            f"{row.track_label or row.track_id} → {row.total}"
+            for row in plays_rows
+        ]
+        if not top_plays_lines:
+            top_plays_lines = ["Nenhum dado encontrado."]
+
+        likes_received_lines = [
+            f"{row.track_label or row.track_id} → {row.total}"
+            for row in likes_received_rows
+        ]
+        if not likes_received_lines:
+            likes_received_lines = ["Nenhum dado encontrado."]
+
+        likes_sent_lines = [
+            f"{row.track_label or row.track_id} → {'♥' if int(row.liked or 0) == 1 else '♡'}"
+            for row in likes_sent_rows
+        ]
+        if not likes_sent_lines:
+            likes_sent_lines = ["Nenhum dado encontrado."]
+
+        response = (
+            "DEBUG USER\n\n"
+            f"user_id: {target_user_id}\n\n"
+            "RESUMO:\n"
+            f"plays totais: {total_plays}\n"
+            f"likes recebidos: {likes_received}\n"
+            f"likes enviados: {likes_sent}\n\n"
+            "COMPORTAMENTO:\n"
+            f"status: {status}\n"
+            f"engajamento: {engagement}\n\n"
+            "TOP MÚSICAS:\n"
+            f"{chr(10).join(top_plays_lines)}\n\n"
+            "LIKES RECEBIDOS:\n"
+            f"{chr(10).join(likes_received_lines)}\n\n"
+            "LIKES ENVIADOS:\n"
+            f"{chr(10).join(likes_sent_lines)}"
+        )
+        await message.answer(response)
+
+    @dp.message(Command("healthfull"))
+    async def healthfull(message: Message) -> None:
+        if not message.from_user or message.from_user.id != OWNER_ID:
+            return
+
+        start = time.perf_counter()
+
+        telegram_status = "OK"
+        webhook_status = "OK"
+        database_status = "OK"
+        spotify_status = "OK"
+        flow_status = "OK"
+        pending_updates: int | None = None
+        webhook_error_message: str | None = None
+        webhook_error_date_utc: str | None = None
+        webhook_error_code: int | None = None
+
+        try:
+            await message.bot.get_me()
+        except Exception:
+            telegram_status = "ERROR"
+
+        try:
+            async with httpx.AsyncClient(timeout=8.0) as client:
+                response = await client.get(
+                    f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getWebhookInfo"
+                )
+                payload = response.json()
+                result = payload.get("result") if isinstance(payload, dict) else None
+                if not response.is_success or not isinstance(result, dict):
+                    webhook_status = "ERROR"
+                else:
+                    pending_value = result.get("pending_update_count")
+                    if isinstance(pending_value, int):
+                        pending_updates = pending_value
+                    raw_error_message = result.get("last_error_message")
+                    if raw_error_message:
+                        webhook_status = "ERROR"
+                        webhook_error_message = str(raw_error_message)
+                        raw_error_date = result.get("last_error_date")
+                        if isinstance(raw_error_date, int):
+                            webhook_error_date_utc = datetime.utcfromtimestamp(raw_error_date).strftime("%Y-%m-%dT%H:%M:%SZ")
+                        elif raw_error_date is not None:
+                            webhook_error_date_utc = str(raw_error_date)
+                        raw_code = result.get("last_error_code")
+                        if isinstance(raw_code, int):
+                            webhook_error_code = raw_code
+        except Exception:
+            webhook_status = "ERROR"
+
+        try:
+            with SessionLocal() as db:
+                db.execute(text("SELECT 1"))
+        except Exception:
+            database_status = "ERROR"
+
+        track: dict[str, str | None] | None = None
+        user_id = message.from_user.id
+        try:
+            track = await spotify_service.get_current_or_last_played(user_id)
+            if not track:
+                spotify_status = "ERROR"
+        except Exception:
+            spotify_status = "ERROR"
+
+        if spotify_status == "OK":
+            track_name = _normalize_optional_text(track.get("track_name")) if track else None
+            artist = _normalize_optional_text(track.get("artist")) if track else None
+            if not track or not track_name or not artist:
+                flow_status = "ERROR"
+        else:
+            flow_status = "ERROR"
+
+        latency_ms = (time.perf_counter() - start) * 1000
+
+        lines = [
+            "HEALTH FULL",
+            "",
+            f"Telegram: {telegram_status}",
+            f"Webhook: {webhook_status}",
+            f"Database: {database_status}",
+            f"Spotify: {spotify_status}",
+            f"Flow: {flow_status}",
+            f"Latency: {latency_ms:.2f} ms",
+        ]
+        if pending_updates is not None:
+            lines.append(f"pending_updates: {pending_updates}")
+        if webhook_status == "ERROR" and webhook_error_message:
+            lines.extend(
+                [
+                    "",
+                    "Detalhes do webhook:",
+                    "",
+                    f"mensagem: {webhook_error_message}",
+                    f"data_utc: {webhook_error_date_utc or 'desconhecido'}",
+                    f"codigo: {webhook_error_code if webhook_error_code is not None else 'desconhecido'}",
+                    f"pending_updates: {pending_updates if pending_updates is not None else 0}",
+                    "",
+                    "DIAGNOSTICO:",
+                    "",
+                    "origem=webhook",
+                    "tipo=falha_entrega",
+                    f"mensagem={webhook_error_message}",
+                    f"codigo={webhook_error_code if webhook_error_code is not None else 'desconhecido'}",
+                    f"data_utc={webhook_error_date_utc or 'desconhecido'}",
+                    f"pending_updates={pending_updates if pending_updates is not None else 0}",
+                    "",
+                    "acao_recomendada=verificar_webhook_endpoint,verificar_latencia,revisar_logs",
+                ]
+            )
+        if "ERROR" in (
+            telegram_status,
+            webhook_status,
+            database_status,
+            spotify_status,
+            flow_status,
+        ):
+            lines.extend(
+                [
+                    "",
+                    "ALERTA:",
+                    "Foi detectado pelo menos um erro no diagnóstico.",
+                ]
+            )
+
+        await message.answer("\n".join(lines))
+
+    @dp.message(Command("logout"))
+    async def logout(message: Message) -> None:
+        user_id = message.from_user.id if message.from_user else 0
+        try:
+            await spotify_service.clear_user_session(user_id)
+            await message.answer(
+                "🔌 Desconectado do Spotify.\n"
+                "Use /login para conectar novamente."
+            )
+        except Exception as exc:
+            await _handle_spotify_error(message, exc)
+
+    @dp.message(F.text & ~F.text.startswith("/"))
+    async def natural_handler(message: Message) -> None:
+        if not message.text or not message.from_user:
+            return
+
+        text = message.text.strip().lower()
+
+        if text in BLOCKED_WORDS:
+            await message.answer("Mensagem não permitida.")
+            return
+
+        user_id = message.from_user.id
+
+        if not allow(user_id):
+            return
+
+        intent = detect_intent(message.text)
+        if intent == "play":
+            await play(message)
+
+    @dp.callback_query(lambda c: c.data and c.data.startswith("plays:"))
+    async def playing_stats(callback: CallbackQuery) -> None:
+        if not callback.data or ":" not in callback.data:
+            await callback.answer()
+            return
+
+        parts = callback.data.split(":", 1)
+        if len(parts) < 2:
+            await callback.answer()
+            return
+
+        track_id = parts[1]
+        if not track_id:
+            await callback.answer()
+            return
+
+        user_id = callback.from_user.id
+        user_plays = await likes_service.get_user_play_count(user_id, track_id)
+        vez = "vez" if user_plays == 1 else "vezes"
+        try:
+            await callback.answer(
+                f"♫ Você já ouviu {user_plays} {vez}",
+                show_alert=True
+            )
+        except TelegramBadRequest:
+            pass
+
+    @dp.callback_query(lambda c: c.data and c.data.startswith("like:"))
+    async def like_track(callback: CallbackQuery) -> None:
+        await callback.answer()
+
+        if not callback.data or ":" not in callback.data:
+            await callback.answer()
+            return
+
+        parts = callback.data.split(":", 1)
+        if len(parts) < 2:
+            await callback.answer()
+            return
+
+        track_id = parts[1]
+        if not track_id:
+            await callback.answer()
+            return
+
+        user_id = callback.from_user.id
+
+        owner_user_id = _extract_owner_user_id_from_message(callback.message)
+        liked = await likes_service.toggle_track_like(user_id, owner_user_id, track_id)
+        is_liked = bool(liked)
+        total_likes = await likes_service.get_total_likes(track_id, owner_user_id=owner_user_id)
+        total_plays = await likes_service.get_track_play_count(track_id)
+
+        keyboard = _playing_keyboard(track_id, total_plays, total_likes, is_liked)
+        try:
+            await callback.message.edit_reply_markup(reply_markup=keyboard)
+        except TelegramBadRequest:
+            pass
+
+
+async def shutdown_telegram_bot() -> None:
+    return
