@@ -18,6 +18,8 @@ from aiogram.types import (
     CallbackQuery,
     InlineQuery,
     InlineQueryResultPhoto,
+    InlineQueryResultArticle,
+    InputTextMessageContent,
     InlineKeyboardMarkup,
     InlineKeyboardButton,
 )
@@ -61,6 +63,27 @@ MOOD_PHRASES_CUNTY = {
     10: "☻ <i>Tenho certeza que <b>{name}</b> tem poder para iniciar o novo apocalipse — apenas tome cuidado.</i>",
 }
 
+
+
+
+def _format_albnow(user_name: str, data: dict) -> str:
+    safe_user = html.escape(user_name or "Usuário")
+
+    album = html.escape(str(data.get("album_name") or ""))
+    artist = html.escape(str(data.get("artist_name") or data.get("artist") or ""))
+    track = html.escape(str(data.get("track_name") or ""))
+    album_url = str(data.get("album_url") or "")
+
+    if album and artist and album_url:
+        return (
+            f"{safe_user} · "
+            f"<i>♪ <b><a href=\"{album_url}\">{album}</a></b> — {artist}</i>"
+        )
+
+    if track and artist:
+        return f"{safe_user} · <i>♬ {track} — {artist}</i>"
+
+    return f"{safe_user} · <i>nada tocando agora</i>"
 
 def _safe_button(text: str, callback: str, style: str | None = None):
     try:
@@ -221,6 +244,52 @@ def _register_handlers(dp: Dispatcher) -> None:
         )
         await query.answer([result], cache_time=2)
 
+
+
+    @dp.inline_query()
+    async def inline_album(query: InlineQuery) -> None:
+        text = (query.query or "").strip()
+
+        if text != "Album":
+            await query.answer([], cache_time=1, is_personal=True)
+            return
+
+        data = await spotify_service.get_current_or_last_played(query.from_user.id)
+
+        if not data:
+            await query.answer([], cache_time=1, is_personal=True)
+            return
+
+        if not data.get("album_url"):
+            data["album_url"] = (
+                data.get("item", {})
+                .get("album", {})
+                .get("external_urls", {})
+                .get("spotify")
+                or ""
+            )
+
+        formatted = _format_albnow(query.from_user.full_name, data)
+
+        album = str(data.get("album_name") or data.get("track_name") or "Agora")
+        artist = str(data.get("artist_name") or data.get("artist") or "")
+
+        result = InlineQueryResultArticle(
+            id="albnow",
+            title=f"{album} — {artist}".strip(" —"),
+            description="Compartilhar álbum atual",
+            input_message_content=InputTextMessageContent(
+                message_text=formatted,
+                parse_mode="HTML",
+            ),
+        )
+
+        await query.answer(
+            [result],
+            cache_time=1,
+            is_personal=True,
+        )
+
     # ========================
     # COMMANDS
     # ========================
@@ -343,6 +412,42 @@ def _register_handlers(dp: Dispatcher) -> None:
 
         except Exception as exc:
             await _handle_spotify_error(message, exc)
+
+
+    @dp.message(Command("albnow"))
+    async def albnow(message: Message) -> None:
+        if not message.from_user:
+            return
+
+        data = await spotify_service.get_current_or_last_played(message.from_user.id)
+
+        if not data:
+            await message.answer("Nada tocando agora.")
+            return
+
+        if not data.get("album_url"):
+            data["album_url"] = (
+                data.get("item", {})
+                .get("album", {})
+                .get("external_urls", {})
+                .get("spotify")
+                or ""
+            )
+
+        caption = _format_albnow(message.from_user.full_name, data)
+        cover = data.get("cover_url") or data.get("album_image_url")
+
+        if cover:
+            await message.answer_photo(
+                photo=str(cover),
+                caption=caption,
+                parse_mode="HTML",
+            )
+        else:
+            await message.answer(
+                caption,
+                parse_mode="HTML",
+            )
 
     @dp.message(Command("kingplay"))
     async def kingplay(message: Message) -> None:
