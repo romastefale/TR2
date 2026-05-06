@@ -69,28 +69,41 @@ MOOD_PHRASES_CUNTY = {
 def _format_albnow(user_name: str, data: dict) -> str:
     safe_user = html.escape(user_name or "Usuário")
 
-    album = html.escape(str(data.get("album_name") or ""))
-    artist = html.escape(str(data.get("artist_name") or data.get("artist") or ""))
-    track = html.escape(str(data.get("track_name") or ""))
-    album_url = str(data.get("album_url") or "")
+    album = html.escape(
+        str(data.get("album_name") or "")
+    )
+
+    artist = html.escape(
+        str(data.get("artist") or "")
+    )
+
+    track = html.escape(
+        str(data.get("track_name") or "")
+    )
+
+    album_url = html.escape(
+        str(data.get("album_url") or ""),
+        quote=True,
+    )
 
     if album_url:
-        album_title = album or track
-        if album_title and artist:
-            return (
-                f"{safe_user} · "
-                f"<i>♪ <b><a href=\"{album_url}\">{album_title}</a></b> — {artist}</i>"
-            )
-        if album_title:
-            return (
-                f"{safe_user} · "
-                f"<i>♪ <b><a href=\"{album_url}\">{album_title}</a></b></i>"
-            )
+        title = album or track or "Spotify"
+
+        return (
+            f"{safe_user} · "
+            f"<i>♪ <b><a href=\"{album_url}\">{title}</a></b> — {artist}</i>"
+        )
 
     if track and artist:
-        return f"{safe_user} · <i>♬ {track} — {artist}</i>"
+        return (
+            f"{safe_user} · "
+            f"<i>♬ {track} — {artist}</i>"
+        )
 
-    return f"{safe_user} · <i>nada tocando agora</i>"
+    return (
+        f"{safe_user} · "
+        f"<i>nada tocando agora</i>"
+    )
 
 def _safe_button(text: str, callback: str, style: str | None = None):
     try:
@@ -172,6 +185,9 @@ def _register_handlers(dp: Dispatcher) -> None:
     # ========================
     @dp.inline_query()
     async def inline_play(query: InlineQuery) -> None:
+        if (query.query or "").strip() == "Album":
+            return
+
         text = (query.query or "").strip()
         lowered_text = text.lower()
         if lowered_text == "playing":
@@ -255,36 +271,37 @@ def _register_handlers(dp: Dispatcher) -> None:
 
     @dp.inline_query()
     async def inline_album(query: InlineQuery) -> None:
+
         text = (query.query or "").strip()
 
         if text != "Album":
-            await query.answer([], cache_time=1, is_personal=True)
             return
 
-        data = await spotify_service.get_current_or_last_played(query.from_user.id)
+        data = await spotify_service.get_current_or_last_played(
+            query.from_user.id
+        )
 
         if not data:
-            await query.answer([], cache_time=1, is_personal=True)
+            await query.answer([], cache_time=1)
             return
 
-        if not data.get("album_url"):
-            data["album_url"] = (
-                data.get("item", {})
-                .get("album", {})
-                .get("external_urls", {})
-                .get("spotify")
-                or ""
-            )
+        formatted = _format_albnow(
+            query.from_user.full_name,
+            data,
+        )
 
-        formatted = _format_albnow(query.from_user.full_name, data)
+        title = (
+            data.get("album_name")
+            or data.get("track_name")
+            or "Spotify"
+        )
 
-        album = str(data.get("album_name") or data.get("track_name") or "Agora")
-        artist = str(data.get("artist_name") or data.get("artist") or "")
+        artist = str(data.get("artist") or "")
 
         result = InlineQueryResultArticle(
             id="albnow",
-            title=f"{album} — {artist}".strip(" —"),
-            description="Compartilhar álbum atual",
+            title=f"{title} — {artist}".strip(" —"),
+            description="Compartilhar release atual",
             input_message_content=InputTextMessageContent(
                 message_text=formatted,
                 parse_mode="HTML",
@@ -432,17 +449,15 @@ def _register_handlers(dp: Dispatcher) -> None:
             await message.answer("Nada tocando agora.")
             return
 
-        if not data.get("album_url"):
-            data["album_url"] = (
-                data.get("item", {})
-                .get("album", {})
-                .get("external_urls", {})
-                .get("spotify")
-                or ""
-            )
+        caption = _format_albnow(
+            message.from_user.full_name,
+            data,
+        )
 
-        caption = _format_albnow(message.from_user.full_name, data)
-        cover = data.get("cover_url") or data.get("album_image_url")
+        cover = (
+            data.get("album_image_url")
+            or data.get("cover_url")
+        )
 
         if cover:
             await message.answer_photo(
