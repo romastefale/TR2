@@ -34,7 +34,7 @@ bot_dispatcher: Dispatcher = Dispatcher()
 SAO_PAULO_TZ = ZoneInfo("America/Sao_Paulo")
 BLOCKED_WORDS = ["palavra1", "palavra2"]
 OWNER_LINK_RE = re.compile(r"tg://user\?id=(\d+)")
-ALBUM_TRIGGER_KEYWORDS = {
+VALID_RELEASE_INLINE = {
     "rls",
     "psc",
     "dsc",
@@ -191,7 +191,7 @@ def _register_handlers(dp: Dispatcher) -> None:
 
         text = (query.query or "").strip().lower()
 
-        if text not in ALBUM_TRIGGER_KEYWORDS:
+        if text not in VALID_RELEASE_INLINE:
             return
 
         try:
@@ -234,7 +234,7 @@ def _register_handlers(dp: Dispatcher) -> None:
 
     @dp.inline_query()
     async def inline_play(query: InlineQuery) -> None:
-        if (query.query or "").strip().lower() in ALBUM_TRIGGER_KEYWORDS:
+        if (query.query or "").strip().lower() in VALID_RELEASE_INLINE:
             return
 
         text = (query.query or "").strip()
@@ -1071,6 +1071,46 @@ def _register_handlers(dp: Dispatcher) -> None:
         intent = detect_intent(message.text)
         if intent == "play":
             await play(message)
+            return
+
+        if intent == "album_release":
+            try:
+                data = await spotify_service.get_current_or_last_played(
+                    message.from_user.id
+                )
+            except Exception:
+                logger.exception("ALBUM_RELEASE_SPOTIFY_FAILED")
+                return
+
+            if not data:
+                return
+
+            caption = _format_albnow(
+                message.from_user.full_name,
+                data,
+            )
+
+            cover = (
+                data.get("album_image_url")
+                or data.get("cover_url")
+            )
+
+            try:
+                if cover:
+                    await message.answer_photo(
+                        photo=str(cover),
+                        caption=caption,
+                        parse_mode="HTML",
+                    )
+                    return
+
+                await message.answer(
+                    caption,
+                    parse_mode="HTML",
+                )
+            except Exception:
+                logger.exception("ALBUM_RELEASE_SEND_FAILED")
+            return
 
     @dp.callback_query(lambda c: c.data and c.data.startswith("plays:"))
     async def playing_stats(callback: CallbackQuery) -> None:
