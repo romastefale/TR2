@@ -35,7 +35,6 @@ SAO_PAULO_TZ = ZoneInfo("America/Sao_Paulo")
 BLOCKED_WORDS = ["palavra1", "palavra2"]
 OWNER_LINK_RE = re.compile(r"tg://user\?id=(\d+)")
 ALBUM_TRIGGER_KEYWORDS = {
-    "album",
     "rls",
     "psc",
     "dsc",
