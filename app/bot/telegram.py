@@ -18,8 +18,6 @@ from aiogram.types import (
     CallbackQuery,
     InlineQuery,
     InlineQueryResultPhoto,
-    InlineQueryResultArticle,
-    InputTextMessageContent,
     InlineKeyboardMarkup,
     InlineKeyboardButton,
 )
@@ -184,6 +182,52 @@ def _register_handlers(dp: Dispatcher) -> None:
     # INLINE MODE
     # ========================
     @dp.inline_query()
+    async def inline_album(query: InlineQuery) -> None:
+
+        text = (query.query or "").strip()
+
+        if text != "Album":
+            return
+
+        try:
+            data = await spotify_service.get_current_or_last_played(
+                query.from_user.id
+            )
+        except Exception:
+            logger.exception("INLINE_ALBUM_SPOTIFY_FAILED")
+            await query.answer([], cache_time=1, is_personal=True)
+            return
+
+        if not data:
+            await query.answer([], cache_time=1, is_personal=True)
+            return
+
+        formatted = _format_albnow(
+            query.from_user.full_name,
+            data,
+        )
+
+        image = (
+            data.get("album_image_url")
+            or data.get("cover_url")
+            or "https://via.placeholder.com/512"
+        )
+
+        result = InlineQueryResultPhoto(
+            id=str(uuid.uuid4()),
+            photo_url=str(image),
+            thumbnail_url=str(image),
+            caption=formatted,
+            parse_mode="HTML",
+        )
+
+        await query.answer(
+            [result],
+            cache_time=1,
+            is_personal=True,
+        )
+
+    @dp.inline_query()
     async def inline_play(query: InlineQuery) -> None:
         if (query.query or "").strip() == "Album":
             return
@@ -269,50 +313,6 @@ def _register_handlers(dp: Dispatcher) -> None:
 
 
 
-    @dp.inline_query()
-    async def inline_album(query: InlineQuery) -> None:
-
-        text = (query.query or "").strip()
-
-        if text != "Album":
-            return
-
-        data = await spotify_service.get_current_or_last_played(
-            query.from_user.id
-        )
-
-        if not data:
-            await query.answer([], cache_time=1)
-            return
-
-        formatted = _format_albnow(
-            query.from_user.full_name,
-            data,
-        )
-
-        title = (
-            data.get("album_name")
-            or data.get("track_name")
-            or "Spotify"
-        )
-
-        artist = str(data.get("artist") or "")
-
-        result = InlineQueryResultArticle(
-            id="albnow",
-            title=f"{title} — {artist}".strip(" —"),
-            description="Compartilhar release atual",
-            input_message_content=InputTextMessageContent(
-                message_text=formatted,
-                parse_mode="HTML",
-            ),
-        )
-
-        await query.answer(
-            [result],
-            cache_time=1,
-            is_personal=True,
-        )
 
     # ========================
     # COMMANDS
