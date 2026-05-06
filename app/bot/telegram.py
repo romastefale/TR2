@@ -184,9 +184,9 @@ def _register_handlers(dp: Dispatcher) -> None:
     @dp.inline_query()
     async def inline_album(query: InlineQuery) -> None:
 
-        text = (query.query or "").strip()
+        text = (query.query or "").strip().lower()
 
-        if text != "Album":
+        if text != "album":
             return
 
         try:
@@ -229,7 +229,7 @@ def _register_handlers(dp: Dispatcher) -> None:
 
     @dp.inline_query()
     async def inline_play(query: InlineQuery) -> None:
-        if (query.query or "").strip() == "Album":
+        if (query.query or "").strip().lower() == "album":
             return
 
         text = (query.query or "").strip()
