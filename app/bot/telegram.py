@@ -34,6 +34,12 @@ bot_dispatcher: Dispatcher = Dispatcher()
 SAO_PAULO_TZ = ZoneInfo("America/Sao_Paulo")
 BLOCKED_WORDS = ["palavra1", "palavra2"]
 OWNER_LINK_RE = re.compile(r"tg://user\?id=(\d+)")
+ALBUM_TRIGGER_KEYWORDS = {
+    "album",
+    "rls",
+    "psc",
+    "dsc",
+}
 MOOD_PHRASES_NORMAL = {
     0: "☹︎ <i>Acho que <b>{name}</b> está no fundo de um abismo, onde até o silêncio pesa.</i>",
     1: "⍨ <i>Acho que <b>{name}</b> está preso em uma melancolia que drena até o que resta.</i>",
@@ -186,7 +192,7 @@ def _register_handlers(dp: Dispatcher) -> None:
 
         text = (query.query or "").strip().lower()
 
-        if text != "album":
+        if text not in ALBUM_TRIGGER_KEYWORDS:
             return
 
         try:
@@ -229,7 +235,7 @@ def _register_handlers(dp: Dispatcher) -> None:
 
     @dp.inline_query()
     async def inline_play(query: InlineQuery) -> None:
-        if (query.query or "").strip().lower() == "album":
+        if (query.query or "").strip().lower() in ALBUM_TRIGGER_KEYWORDS:
             return
 
         text = (query.query or "").strip()
@@ -325,6 +331,7 @@ def _register_handlers(dp: Dispatcher) -> None:
             "Conecte sua conta e acompanhe o que você está ouvindo no Spotify.\n\n"
             "Comandos principais:\n"
             "/playing — mostrar música atual\n"
+            "/albnow — compartilhar release atual\n"
             "/mood — analisar o clima da faixa atual\n"
             "/myself — ver seu perfil musical\n"
             "/songcharts — ver ranking do grupo\n\n"
@@ -470,6 +477,63 @@ def _register_handlers(dp: Dispatcher) -> None:
                 caption,
                 parse_mode="HTML",
             )
+
+    @dp.message(
+        F.text,
+        F.chat.type.in_({"group", "supergroup"}),
+    )
+    async def album_keywords(message: Message) -> None:
+        if not message.from_user:
+            return
+
+        if message.from_user.is_bot:
+            return
+
+        if message.reply_to_message:
+            return
+
+        text = (message.text or "").strip().lower()
+
+        if text not in ALBUM_TRIGGER_KEYWORDS:
+            return
+
+        try:
+            data = await spotify_service.get_current_or_last_played(
+                message.from_user.id
+            )
+        except Exception:
+            logger.exception("ALBUM_KEYWORD_SPOTIFY_FAILED")
+            return
+
+        if not data:
+            return
+
+        caption = _format_albnow(
+            message.from_user.full_name,
+            data,
+        )
+
+        cover = (
+            data.get("album_image_url")
+            or data.get("cover_url")
+        )
+
+        try:
+            if cover:
+                await message.answer_photo(
+                    photo=str(cover),
+                    caption=caption,
+                    parse_mode="HTML",
+                )
+                return
+
+            await message.answer(
+                caption,
+                parse_mode="HTML",
+            )
+
+        except Exception:
+            logger.exception("ALBUM_KEYWORD_SEND_FAILED")
 
     @dp.message(Command("kingplay"))
     async def kingplay(message: Message) -> None:
