@@ -74,11 +74,18 @@ def _format_albnow(user_name: str, data: dict) -> str:
     track = html.escape(str(data.get("track_name") or ""))
     album_url = str(data.get("album_url") or "")
 
-    if album and artist and album_url:
-        return (
-            f"{safe_user} · "
-            f"<i>♪ <b><a href=\"{album_url}\">{album}</a></b> — {artist}</i>"
-        )
+    if album_url:
+        album_title = album or track
+        if album_title and artist:
+            return (
+                f"{safe_user} · "
+                f"<i>♪ <b><a href=\"{album_url}\">{album_title}</a></b> — {artist}</i>"
+            )
+        if album_title:
+            return (
+                f"{safe_user} · "
+                f"<i>♪ <b><a href=\"{album_url}\">{album_title}</a></b></i>"
+            )
 
     if track and artist:
         return f"{safe_user} · <i>♬ {track} — {artist}</i>"
