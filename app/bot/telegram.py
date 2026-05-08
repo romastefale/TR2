@@ -182,58 +182,41 @@ def _register_handlers(dp: Dispatcher) -> None:
     # INLINE MODE
     # ========================
     @dp.inline_query()
-    async def inline_album(query: InlineQuery) -> None:
-
-        text = (query.query or "").strip().lower()
-
-        if text != "album":
-            return
-
-        try:
-            data = await spotify_service.get_current_or_last_played(
-                query.from_user.id
-            )
-        except Exception:
-            logger.exception("INLINE_ALBUM_SPOTIFY_FAILED")
-            await query.answer([], cache_time=1, is_personal=True)
-            return
-
-        if not data:
-            await query.answer([], cache_time=1, is_personal=True)
-            return
-
-        formatted = _format_albnow(
-            query.from_user.full_name,
-            data,
-        )
-
-        image = (
-            data.get("album_image_url")
-            or data.get("cover_url")
-            or "https://via.placeholder.com/512"
-        )
-
-        result = InlineQueryResultPhoto(
-            id=str(uuid.uuid4()),
-            photo_url=str(image),
-            thumbnail_url=str(image),
-            caption=formatted,
-            parse_mode="HTML",
-        )
-
-        await query.answer(
-            [result],
-            cache_time=1,
-            is_personal=True,
-        )
-
-    @dp.inline_query()
     async def inline_play(query: InlineQuery) -> None:
-        if (query.query or "").strip().lower() == "album":
+        raw_query = (query.query or "").strip()
+        query_key = raw_query.lower()
+
+        release_inline_aliases = {"rls", "psc", "dsc"}
+        if query_key in release_inline_aliases:
+            try:
+                data = await spotify_service.get_current_or_last_played(query.from_user.id)
+            except Exception:
+                logger.exception("INLINE_RELEASE_SPOTIFY_FAILED")
+                await query.answer([], cache_time=1, is_personal=True)
+                return
+
+            if not data:
+                await query.answer([], cache_time=1, is_personal=True)
+                return
+
+            formatted = _format_albnow(query.from_user.full_name, data)
+            image = (
+                data.get("album_image_url")
+                or data.get("cover_url")
+                or "https://via.placeholder.com/512"
+            )
+            result = InlineQueryResultPhoto(
+                id=str(uuid.uuid4()),
+                photo_url=str(image),
+                thumbnail_url=str(image),
+                caption=formatted,
+                parse_mode="HTML",
+            )
+            await query.answer([result], cache_time=1, is_personal=True)
             return
 
-        text = (query.query or "").strip()
-        lowered_text = text.lower()
+        text = raw_query
+        lowered_text = query_key
         if lowered_text == "playing":
             user_id = query.from_user.id
             track = await spotify_service.get_current_or_last_played(user_id)
