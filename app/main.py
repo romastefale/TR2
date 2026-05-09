@@ -9,6 +9,7 @@ from sqlalchemy import text
 from aiogram import Bot, Dispatcher
 from aiogram.types import Update
 
+from app.bot.chat_aliases import preprocess_chat_aliases
 from app.bot.private_tools import router as private_router, ddx_preprocess_update
 from app.handlers.lili_rodou import router as lili_rodou_router
 from app.bot.telegram import _register_handlers, shutdown_telegram_bot, bot_dispatcher
@@ -132,6 +133,7 @@ async def telegram_webhook(request: Request):
 
         if not ddx_deleted:
             try:
+                preprocess_chat_aliases(update)
                 await dispatcher.feed_update(bot, update)
             except Exception:
                 logger.exception("DISPATCHER_FAILED | update_id=%s", update.update_id)
