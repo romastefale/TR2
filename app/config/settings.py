@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 
@@ -27,6 +28,37 @@ def _int_env(name: str, default: int) -> int:
 
 
 OWNER_ID = _int_env("OWNER_ID", 8505890439)
+
+
+def _chat_aliases_env() -> dict[str, int]:
+    raw = os.getenv("CHAT_ALIASES", "").strip()
+    if not raw:
+        return {}
+
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+
+    if not isinstance(data, dict):
+        return {}
+
+    aliases: dict[str, int] = {}
+    for key, value in data.items():
+        alias = str(key).strip().lower()
+        if not alias:
+            continue
+        if not alias.replace("_", "").replace("-", "").isalnum():
+            continue
+        try:
+            aliases[alias] = int(value)
+        except (TypeError, ValueError):
+            continue
+
+    return aliases
+
+
+CHAT_ALIASES = _chat_aliases_env()
 
 # ========================
 # SPOTIFY
